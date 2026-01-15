@@ -4,16 +4,18 @@ import pywt
 import matplotlib.pyplot as plt
 import seaborn as sns
 from typing import Optional, Dict, Any, Tuple
-from sklearn.model_selection import GridSearchCV
+from sklearn.model_selection import GridSearchCV, ParameterGrid
 from sklearn.metrics import confusion_matrix, classification_report
 import time
+import sys
+from contextlib import contextmanager
 
 # Rich imports
 try:
     from rich.console import Console
     from rich.table import Table
     from rich.panel import Panel
-    from rich.progress import track
+    from rich.progress import track, Progress, SpinnerColumn, BarColumn, TextColumn, TimeElapsedColumn
     from rich import print as rprint
     from rich.text import Text
     RICH_AVAILABLE = True
@@ -22,6 +24,36 @@ except ImportError:
     # Fallback to regular print
     def rprint(*args, **kwargs):
         print(*args, **kwargs)
+
+# tqdm import for GridSearchCV progress
+try:
+    from tqdm.auto import tqdm
+    TQDM_AVAILABLE = True
+except ImportError:
+    TQDM_AVAILABLE = False
+
+# Joblib callback for progress monitoring
+@contextmanager
+def tqdm_joblib_callback(tqdm_object):
+    """Context manager to patch joblib to report into tqdm progress bar"""
+    def tqdm_print_progress(self):
+        if self.n_completed_tasks > 0:
+            tqdm_object.update(self.n_completed_tasks - tqdm_object.n)
+
+    import joblib
+
+    # Store original callback
+    original_print_progress = joblib.parallel.Parallel.print_progress
+
+    # Monkey patch
+    joblib.parallel.Parallel.print_progress = tqdm_print_progress
+
+    try:
+        yield tqdm_object
+    finally:
+        # Restore original callback
+        joblib.parallel.Parallel.print_progress = original_print_progress
+        tqdm_object.close()
 
 
 class MLPipeline:
@@ -222,12 +254,18 @@ class MLPipeline:
         self.use_wavelets = use_wavelets
         self.normalize = normalize
 
+        # Calculate total number of fits
+        n_combinations = len(list(ParameterGrid(param_grid)))
+        total_fits = n_combinations * cv
+
         if RICH_AVAILABLE and self.console:
             # GridSearch info panel
             self.console.print(Panel.fit(
                 f"[cyan]Model:[/cyan] {self.model.__class__.__name__}\n"
                 f"[cyan]Cross-validation folds:[/cyan] {cv}\n"
                 f"[cyan]Scoring metric:[/cyan] {scoring}\n"
+                f"[cyan]Parameter combinations:[/cyan] [yellow]{n_combinations}[/yellow]\n"
+                f"[cyan]Total fits:[/cyan] [yellow]{total_fits}[/yellow] ({n_combinations} combinations × {cv} folds)\n"
                 f"[cyan]Use wavelets:[/cyan] {'[green]Yes[/green]' if use_wavelets else '[red]No[/red]'}\n"
                 f"[cyan]Normalize:[/cyan] {'[green]Yes[/green]' if normalize else '[red]No[/red]'}",
                 title="🔍 GridSearchCV Hyperparameter Tuning",
@@ -238,13 +276,16 @@ class MLPipeline:
             param_table = Table(title="Parameter Grid", show_header=True, header_style="bold cyan")
             param_table.add_column("Parameter", style="cyan", no_wrap=True)
             param_table.add_column("Values", style="magenta")
+            param_table.add_column("# Values", style="yellow", justify="center")
 
             for param_name, param_values in param_grid.items():
-                param_table.add_row(param_name, str(param_values))
+                param_table.add_row(param_name, str(param_values), str(len(param_values)))
 
             self.console.print(param_table)
             self.console.print("[cyan]Preparing features...[/cyan]")
         else:
+            print(f"Total parameter combinations: {n_combinations}")
+            print(f"Total fits: {total_fits} ({n_combinations} combinations × {cv} folds)")
             print(f"Preparing features (normalize={normalize}, wavelets={use_wavelets})...")
 
         self.features_train = self._prepare_features(
@@ -254,10 +295,13 @@ class MLPipeline:
         )
 
         if RICH_AVAILABLE and self.console:
-            self.console.print(f"[cyan]Starting GridSearchCV with {cv}-fold cross-validation...[/cyan]")
+            self.console.print(f"\n[cyan]Starting GridSearchCV with {cv}-fold cross-validation...[/cyan]")
+            self.console.print(f"[yellow]⏳ Processing {total_fits} fits... (verbose={verbose})[/yellow]")
+            self.console.print(f"[dim]Tip: Watch the output below for sklearn's verbose progress[/dim]\n")
         else:
-            print(f"Starting GridSearchCV with {cv}-fold cross-validation...")
+            print(f"\nStarting GridSearchCV with {cv}-fold cross-validation...")
             print(f"Parameter grid: {param_grid}")
+            print(f"Processing {total_fits} fits... (verbose={verbose})\n")
 
         grid_search = GridSearchCV(
             estimator=self.model,
@@ -269,8 +313,30 @@ class MLPipeline:
         )
 
         start_time = time.time()
-        grid_search.fit(self.features_train, self.label_train)
+
+        # Use tqdm progress bar if available
+        if TQDM_AVAILABLE and n_jobs != 1:
+            if RICH_AVAILABLE and self.console:
+                self.console.print("[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]")
+                self.console.print("[bold cyan]             GridSearchCV Progress                         [/bold cyan]")
+                self.console.print("[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]\n")
+
+            with tqdm_joblib_callback(tqdm(desc="GridSearchCV", total=total_fits, file=sys.stdout)):
+                grid_search.fit(self.features_train, self.label_train)
+        else:
+            if RICH_AVAILABLE and self.console:
+                self.console.print("[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]")
+                self.console.print("[bold cyan]             GridSearchCV Progress Output                  [/bold cyan]")
+                self.console.print("[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]\n")
+
+            grid_search.fit(self.features_train, self.label_train)
+
         elapsed_time = time.time() - start_time
+
+        if RICH_AVAILABLE and self.console:
+            self.console.print("\n[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]")
+            self.console.print(f"[bold green]✅ GridSearchCV completed in {elapsed_time:.2f}s[/bold green]")
+            self.console.print("[bold cyan]═══════════════════════════════════════════════════════════[/bold cyan]\n")
 
         # Store the best model
         self.model = grid_search.best_estimator_
