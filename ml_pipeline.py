@@ -6,6 +6,7 @@ import seaborn as sns
 from typing import Optional, Dict, Any, Tuple
 from sklearn.model_selection import GridSearchCV, ParameterGrid
 from sklearn.metrics import confusion_matrix, classification_report
+from sklearn.preprocessing import StandardScaler
 import time
 import sys
 from contextlib import contextmanager
@@ -62,6 +63,7 @@ class MLPipeline:
         self.wavelet = wavelet
         self.use_wavelets = False
         self.normalize = False
+        self.use_scaler = False
 
         # Data containers
         self.data_train = None
@@ -75,6 +77,9 @@ class MLPipeline:
 
         # Predictions
         self.predictions = None
+
+        # StandardScaler
+        self.scaler = None
 
         # Rich console
         if RICH_AVAILABLE:
@@ -197,12 +202,13 @@ class MLPipeline:
 
         return features
 
-    def fit(self, use_wavelets: bool = True, normalize: bool = True) -> 'MLPipeline':
+    def fit(self, use_wavelets: bool = True, normalize: bool = True, use_scaler: bool = False) -> 'MLPipeline':
         if self.data_train is None:
             raise ValueError("No training data loaded. Call load_data() first.")
 
         self.use_wavelets = use_wavelets
         self.normalize = normalize
+        self.use_scaler = use_scaler
 
         start_time = time.time()
 
@@ -211,19 +217,27 @@ class MLPipeline:
             self.console.print(Panel.fit(
                 f"[cyan]Model:[/cyan] {self.model.__class__.__name__}\n"
                 f"[cyan]Use wavelets:[/cyan] {'[green]Yes[/green]' if use_wavelets else '[red]No[/red]'}\n"
-                f"[cyan]Normalize:[/cyan] {'[green]Yes[/green]' if normalize else '[red]No[/red]'}",
+                f"[cyan]Normalize:[/cyan] {'[green]Yes[/green]' if normalize else '[red]No[/red]'}\n"
+                f"[cyan]StandardScaler:[/cyan] {'[green]Yes[/green]' if use_scaler else '[red]No[/red]'}",
                 title="🎯 Training Model",
                 border_style="blue"
             ))
             self.console.print("[cyan]Preparing features...[/cyan]")
         else:
-            print(f"Preparing features (normalize={normalize}, wavelets={use_wavelets})...")
+            print(f"Preparing features (normalize={normalize}, wavelets={use_wavelets}, scaler={use_scaler})...")
 
         self.features_train = self._prepare_features(
             self.data_train,
             use_wavelets=use_wavelets,
             normalize=normalize
         )
+
+        # Apply StandardScaler if requested
+        if use_scaler:
+            if RICH_AVAILABLE and self.console:
+                self.console.print("[cyan]Applying StandardScaler...[/cyan]")
+            self.scaler = StandardScaler()
+            self.features_train = self.scaler.fit_transform(self.features_train)
 
         if RICH_AVAILABLE and self.console:
             self.console.print(f"[cyan]Training model on {self.features_train.shape[0]} samples with {self.features_train.shape[1]} features...[/cyan]")
@@ -246,13 +260,14 @@ class MLPipeline:
 
     def fit_with_gridsearch(self, param_grid: Dict[str, Any], cv: int = 5,
                            scoring: str = 'accuracy', use_wavelets: bool = True,
-                           normalize: bool = True, n_jobs: int = -1,
+                           normalize: bool = True, use_scaler: bool = False, n_jobs: int = -1,
                            verbose: int = 3) -> 'MLPipeline':
         if self.data_train is None:
             raise ValueError("No training data loaded. Call load_data() first.")
 
         self.use_wavelets = use_wavelets
         self.normalize = normalize
+        self.use_scaler = use_scaler
 
         # Calculate total number of fits
         n_combinations = len(list(ParameterGrid(param_grid)))
